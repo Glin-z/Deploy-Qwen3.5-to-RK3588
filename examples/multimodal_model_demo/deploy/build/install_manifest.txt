@@ -1,0 +1,6 @@
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/./imgenc
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/./audioenc
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/./demo
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/lib/librknnrt.so
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/lib/librkllmrt.so
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/install/demo_Linux_aarch64/./demo.jpg

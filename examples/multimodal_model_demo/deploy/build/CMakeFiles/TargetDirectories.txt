@@ -1,0 +1,9 @@
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/imgenc.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/audioenc.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/demo.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/edit_cache.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/rebuild_cache.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/list_install_components.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/install.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/install/local.dir
+/home/top/CodeField/Qwen3.5/multimodal_model_demo/deploy/build/CMakeFiles/install/strip.dir
