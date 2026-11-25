@@ -1,18 +1,13 @@
-# Qwen3.5 在 RK3588 上的完整部署指南
+# Qwen3.5 在 RK3588 上的部署流程
 
 > 从 HuggingFace 权重 → RKNN（视觉）+ RKLLM（语言）→ 板端 C++ 推理
 ---
+Qwen3.5 的内部由两部分组成：**视觉编码器 + 投影层** 和 **语言模型**。这两段在 RK3588 上须用不同的 SDK 分别转换，因为它们的运行方式完全不同：
 
-## 0. 总览
-
-### 0.1 为什么要拆成两个模型
-
-Qwen3.5 是原生多模态模型，内部由两段组成：**视觉编码器 + 投影层** 和 **语言模型（LLM）**。这两段在 RK3588 上必须用两套不同的 SDK 分别转换，因为它们的运行方式完全不同：
-
-| 组件 | 原始来源 | 转换工具 | 产物 | 板上运行库 | 职责 |
+| 模块 | 原始来源 | 转换工具 | 产物 | 板上运行库 | 职责 |
 |---|---|---|---|---|---|
-| 视觉模块（Visual + Projector） | `model.safetensors` 中 `visual.*` / `model.visual.*` 权重 | **rknn-toolkit2 2.3.2** | `*.rknn` | `librknnrt.so` | 图片 → 196 × hidden 的图像 embedding，跑在 NPU |
-| 文本模块（LLM） | 整个模型的 `model.language_model.*` + `lm_head` | **rkllm-toolkit 1.3.1** | `*.rkllm` | `librkllmrt.so` | 接收文本 token + 图像 embedding，自回归生成回答，跑在 NPU |
+| 视觉模块 | `model.safetensors` 中 `visual.*` / `model.visual.*` 权重 | **rknn-toolkit2 2.3.2** | `*.rknn` | `librknnrt.so` | 图片 → 196 × hidden 的图像 embedding，跑在 NPU |
+| 文本模块 | 整个模型的 `model.language_model.*` + `lm_head` | **rkllm-toolkit 1.3.1** | `*.rkllm` | `librkllmrt.so` | 接收文本 token + 图像 embedding，自回归生成回答，跑在 NPU |
 
 数据流：
 
@@ -27,107 +22,16 @@ demo.jpg ──► [Vision RKNN / NPU] ──► image_embed (196 × hidden, fp3
                         "图中是一个身穿机甲的少女……"
 ```
 
-`<image>` 是 rkllm 运行时的**触发标记**：它会被展开成 `<|vision_start|>` + 196 × `<|image_pad|>` + `<|vision_end|>`，然后那 196 组 embedding 按顺序填进这些 token 的位置。这就是为什么命令行最后三个参数必须传这三个 special token。
-
-### 0.2 版本矩阵（本指南使用的版本，务必对齐）
-
-| 项目 | 版本 | 说明 |
-|---|---|---|
-| rkllm-toolkit | **1.3.1** | PC 端转换 LLM，仓库已带 whl |
-| rknn-toolkit2 | **2.3.2** | PC 端转换视觉编码器 |
-| librknnrt.so | **2.3.2** | 板端 NPU 运行时，仓库已带 |
-| librkllmrt.so | **1.3.1** | 板端 LLM 运行时，仓库已带 |
-| rknpu 内核驱动 | **≥ 0.9.8** | 板端 BSP 自带，用 `dmesg` 确认 |
-| Python | 3.10 / 3.11 / 3.12 | 三选一，与 whl 的 cp 标签一致 |
-| transformers | **5.8.0** | 含 `Qwen3_5ForConditionalGeneration` |
-| torch | 2.6.0 | 与 rkllm-toolkit 依赖一致 |
-
-> **最重要的一条**：`rknn-toolkit2` 版本要和板上的 `librknnrt.so` 版本匹配（都是 2.3.2）。用 2.2.0 的工具链转、跑 2.3.2 的库通常没问题；反过来用 2.3.2 转、跑 1.x 的旧库就会报 `Invalid RKNN model version 6`。
-
 ---
 
 ## 1. 部署前准备
+### 1.1 下载 Qwen3.5 模型权重
 
-### 1.1 硬件与板端系统
-
-| 项 | 要求 | 检查命令 |
-|---|---|---|
-| 开发板 | RK3588 / RK3588S，**建议 8GB 内存以上** | `free -h` |
-| 系统 | Ubuntu 20.04 / 22.04 aarch64，glibc ≥ 2.31 | `ldd --version` |
-| NPU 驱动 | ≥ 0.9.8 | `dmesg \| grep -i rknpu`、`cat /sys/kernel/debug/rknpu/version` |
-| NPU 频率 | 可定频到 1GHz（性能调优用） | `cat /sys/class/devfreq/fdab0000.npu/cur_freq` |
-| 存储 | 预留 **5GB** 以上（模型文件很大） | `df -h` |
-
-内存预算参考（Qwen3.5-0.8B，w8a8）：
-
-```
-.rkllm 常驻    ≈ 0.9 GB
-.rknn 视觉     ≈ 0.4~0.5 GB
-KV cache(4096) ≈ 0.2~0.4 GB
-进程/系统余量  ≈ 0.5 GB
---------------------------------
-合计           ≈ 2.0~2.3 GB
-```
-
-4GB 版本能跑 0.8B，但再叠加摄像头/多进程就容易 OOM；**8GB 起比较稳**。9B 模型 w8a8 约 9GB，RK3588 上不实用。
-
-### 1.2 下载 Qwen3.5 模型权重
-
-Qwen3.5 系列在 HuggingFace 上由 Qwen 官方组织发布，本项目将在 RK3588 部署以 `Qwen/Qwen3.5-0.8B` 模型，并通过国内的 ModelScope 网站获取原模型：
+本项目在 RK3588 部署以 `Qwen/Qwen3.5-0.8B` 模型，并通过国内的 ModelScope 网站获取原模型：
 
 ```bash
 pip install modelscope
 modelscope download --model Qwen/Qwen3.5-0.8B --local_dir ~/models/Qwen3.5-0.8B
-```
-
-**下载后必须检查完整性**：
-
-```bash
-cd ~/models/Qwen3.5-0.8B
-ls -lh
-# 关键文件清单：
-#   config.json                    模型结构
-#   model.safetensors              （或 model-0000x-of-0000y.safetensors + index.json）
-#   preprocessor_config.json       图像预处理参数（patch_size / merge_size）
-#   tokenizer.json / tokenizer_config.json / vocab.json
-#   chat_template.json 或 tokenizer_config.json 内嵌模板
-#   generation_config.json
-
-# 分片模型必须确认每个分片都在，缺一个就加载失败
-cat model.safetensors.index.json | head -30
-
-# 校验单个 safetensors（头部 8 字节是 header 长度，后面是 JSON）
-python - <<'PY'
-import json, struct
-p = "model.safetensors"
-with open(p, "rb") as f:
-    n = struct.unpack("<Q", f.read(8))[0]
-    hdr = json.loads(f.read(n))
-print("tensors:", len(hdr) - 1)   # 减去 __metadata__
-print("has visual:", any(k.startswith(("visual.", "model.visual.")) for k in hdr))
-print("has llm:", any("language_model" in k for k in hdr))
-PY
-```
-
-最后一个脚本很关键：**要能看到 `visual.*` 和 `language_model.*` 两类 key**，说明这是一份包含视觉塔的完整权重。如果只有 `language_model.*`，你下到的是纯文本版，转不出视觉模块。
-
-### 1.3 转换主机环境（x86_64 Linux）
-
-转换**不能**在板子上做（工具链只有 x86_64 版本），需要一台 x86_64 Ubuntu 20.04/22.04 主机或 WSL2。
-
-| 项 | 要求 |
-|---|---|
-| OS | Ubuntu 20.04 / 22.04 x86_64（WSL2 可用，但内存给到 16GB+） |
-| Python | 3.10 / 3.11 / 3.12（与 whl 标签一致） |
-| 内存 | ≥ 16GB（0.8B fp32 加载约 3.2GB，ONNX 导出峰值更高） |
-| 磁盘 | ≥ 20GB 空闲（onnx 中间文件 + rknn + rkllm） |
-| 网络 | 能访问 GitHub / HF 镜像 |
-
-```bash
-# 基础依赖
-sudo apt update
-sudo apt install -y build-essential cmake git wget unzip \
-                    libgl1 libglib2.0-0 python3-dev
 ```
 
 ### 1.4 需要安装的 SDK 与工具
@@ -161,14 +65,12 @@ rknn-llm/
 conda create -n rkllm python=3.10 -y
 conda activate rkllm
 
-# 直接装仓库里带好的 whl，避免版本漂移
-pip install ~/CodeField/rknn-llm/rkllm-toolkit/packages/rkllm_toolkit-1.3.1-cp310-cp310-linux_x86_64.whl
+# 直接装官方仓库里带好的 whl
+pip install ~/path/to/rkllm-toolkit/packages/rkllm_toolkit-1.3.1-cp310-cp310-linux_x86_64.whl
 
-# 再补依赖（这份 requirements 是 toolkit 官方对齐过的版本）
-pip install -r ~/CodeField/rknn-llm/rkllm-toolkit/packages/requirements.txt
+# 再补依赖（ toolkit 官方对齐过的版本）
+pip install -r ~/path/to/rkllm-toolkit/packages/requirements.txt
 ```
-
-`requirements.txt` 里的关键 pin：`transformers==5.8.0`、`torch==2.6.0`、`numpy<=1.26.4`、`safetensors==0.5.3`。**不要随意升级 transformers**，5.8.0 是同时包含 `Qwen3_5ForConditionalGeneration` 和 `Qwen3VLForConditionalGeneration` 的版本。
 
 #### (3) rknn-toolkit2 2.3.2（PC 端，转 .rknn）
 
@@ -176,43 +78,15 @@ pip install -r ~/CodeField/rknn-llm/rkllm-toolkit/packages/requirements.txt
 pip install rknn-toolkit2==2.3.2 -i https://mirrors.aliyun.com/pypi/simple
 ```
 
-如果 pip 源上找不到对应版本（该包并非所有版本都在 PyPI），两条退路：
-
-```bash
-# 退路 1：从 rknn-toolkit2 仓库的 packages/ 目录下载对应 cp 标签的 whl
-#   例：rknn_toolkit2-2.3.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-pip install ./rknn_toolkit2-2.3.2-cp310-cp310-*.whl
-
-# 退路 2：用官方 Docker 镜像（省去 Python/依赖折腾）
-#   镜像名 airockchip/rknn-toolkit2，标签形如 2.3.2-cp310，以仓库 README 的 Docker 章节为准
-docker run -it --rm -v ~/CodeField:/work airockchip/rknn-toolkit2:2.3.2-cp310 /bin/bash
-```
-
-> 如果走 Docker，注意 container 内的 glibc 版本和 `conda` 环境；转换脚本本身只依赖 Python 包，挂载目录即可。
-
 #### (4) 交叉编译工具链（PC 端，编板端 C++）
 
 ```bash
-cd ~/CodeField
-mkdir -p compiler && cd compiler
 wget https://developer.arm.com/-/media/Files/downloads/gnu/11.3.rel1/binrel/\
 arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz
 tar xf arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz
 ```
 
-> 板端 Ubuntu 22.04 的 glibc 是 2.35，11.3.rel1 的 sysroot 是 2.35，正好匹配。
-> **不要**用 `aarch64-linux-gnu-gcc`（Debian 包）或 musl 工具链，链接 `librkllmrt.so` 时容易出问题。
-
-#### (5) 验证环境
-
-```bash
-python -c "from rkllm.api import RKLLM;      print('rkllm-toolkit OK')"
-python -c "from rknn.api  import RKNN;       print('rknn-toolkit2 OK')"
-python -c "import transformers; print('transformers', transformers.__version__)"
-~/CodeField/compiler/arm-gnu-toolchain-11.3.rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-g++ --version
-```
-
-### 1.5 全部依赖一览（可直接抄）
+### 1.5 全部依赖总结
 
 | 类别 | 包 / 组件 | 版本 | 安装位置 |
 |---|---|---|---|
@@ -235,7 +109,7 @@ python -c "import transformers; print('transformers', transformers.__version__)"
 ### 1.6 推荐目录规划
 
 ```
-~/CodeField/
+~/Qwen/
 ├── rknn-llm/                          # 仓库
 ├── compiler/arm-gnu-toolchain-.../    # 交叉工具链
 ├── models/Qwen3.5-0.8B/               # HF 原始权重（safetensors）
@@ -248,46 +122,12 @@ python -c "import transformers; print('transformers', transformers.__version__)"
 
 ## 2. 模型转换
 
-> 所有命令都在 `~/CodeField/rknn-llm/examples/multimodal_model_demo` 下执行（脚本里的相对路径 `./onnx`、`./rknn`、`./rkllm`、`data/` 都是相对这个目录）。
+> 所有命令都在 `~/Qwen/rknn-llm/examples/multimodal_model_demo` 下执行（脚本里的相对路径 `./onnx`、`./rknn`、`./rkllm`、`data/` 都是相对这个目录）。
 
 ```bash
-cd ~/CodeField/rknn-llm/examples/multimodal_model_demo
+cd ~/Qwen/rknn-llm/examples/multimodal_model_demo
 conda activate rkllm
 ```
-
-### 2.1 转换前检查
-
-```bash
-# 1) 确认视觉塔在权重里
-python - <<'PY'
-from safetensors import safe_open
-import glob
-for p in sorted(glob.glob("/home/you/models/Qwen3.5-0.8B/*.safetensors")):
-    with safe_open(p, framework="pt") as f:
-        ks = list(f.keys())
-    print(p, len(ks), "visual keys:", sum(k.startswith(("visual.", "model.visual.")) for k in ks))
-PY
-
-# 2) 确认 config 里的视觉参数（后面 448 的算法依赖它）
-python -c "import json;c=json.load(open('/home/you/models/Qwen3.5-0.8B/config.json'));print(json.dumps(c.get('vision_config',c),indent=2)[:800])"
-```
-
-重点看两个数：
-
-- `patch_size`：Qwen3.5 是 **16**（Qwen2-VL 是 14，Qwen3-VL 是 16）
-- `spatial_merge_size`：**2**
-
-由此推出 448×448 输入的 token 数：
-
-```
-448 / 16 = 28 个 patch/边
-28 × 28 = 784 个 patch
-784 / (2×2) = 196 个 image token
-```
-
-这就是运行日志里 `[196, hidden_size]` 的来源（Qwen3-VL-2B 的 hidden 是 2048，故日志显示 `[196, 2048]`，单份 img_vec 约 6.4MB），也是后面 `max_context_len` 预算的依据。
-
-> 如果 `config.json` 里 `use_flash_attn: true`，先改成 `false` 再转（RKNN 只支持 float32 的 eager 路径）。
 
 ### 2.2 视觉模块：safetensors → ONNX → RKNN
 
