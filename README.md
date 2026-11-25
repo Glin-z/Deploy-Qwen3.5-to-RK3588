@@ -6,8 +6,8 @@ Qwen3.5 的内部由两部分组成：**视觉编码器 + 投影层** 和 **语�
 
 | 模块 | 原始来源 | 转换工具 | 产物 | 板上运行库 | 职责 |
 |---|---|---|---|---|---|
-| 视觉模块 | `model.safetensors` 中 `visual.*` / `model.visual.*` 权重 | **rknn-toolkit2 2.3.2** | `*.rknn` | `librknnrt.so` | 图片 → 196 × hidden 的图像 embedding，跑在 NPU |
-| 文本模块 | 整个模型的 `model.language_model.*` + `lm_head` | **rkllm-toolkit 1.3.1** | `*.rkllm` | `librkllmrt.so` | 接收文本 token + 图像 embedding，自回归生成回答，跑在 NPU |
+| 视觉模块 | `model.safetensors` 中 `visual.*` / `model.visual.*` 权重 | **rknn-toolkit2 2.3.2** | `*.rknn` | `librknnrt.so` | 在 NPU 上将图片编码成图片 embedding |
+| 文本模块 | 整个模型的 `model.language_model.*` + `lm_head` | **rkllm-toolkit 1.3.1** | `*.rkllm` | `librkllmrt.so` | 在 NPU 上接收文本 token + 图像 embedding，自回归生成回答 |
 
 数据流：
 
